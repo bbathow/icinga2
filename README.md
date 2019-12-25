@@ -10,7 +10,7 @@ This build is automated by push for the git-repo. Just crawl it via:
 
 ## Image details
 
-1. Based on debian:stretch
+1. Based on debian:buster
 1. Key-Features:
    - icinga2
    - icingacli
@@ -23,6 +23,7 @@ This build is automated by push for the git-repo. Just crawl it via:
    - Supervisor
    - Apache2
    - SSL Support
+   - Custom CA support
 1. No SSH. Use docker [exec](https://docs.docker.com/engine/reference/commandline/exec/) or [nsenter](https://github.com/jpetazzo/nsenter)
 1. If passwords are not supplied, they will be randomly generated and shown via stdout.
 
@@ -32,9 +33,19 @@ Start a new container and bind to host's port 80
 
     docker run -p 80:80 -h icinga2 -t jordan/icinga2:latest
 
+### docker-compose
+
+Download the [`docker-compose.yml`](./docker-compose.yml) file and create a file `secrets_sql.env`, which contains the `MYSQL_ROOT_PASSWORD` variable.
+
+    curl -O https://raw.githubusercontent.com/jjethwa/icinga2/master/docker-compose.yml
+    echo "MYSQL_ROOT_PASSWORD=<password>" > secrets_sql.env
+    docker-compose up
+
+This boots up an icinga(web)2 container with another MySQL container reachable on [http://localhost](http://localhost) with the default credentials *icingaadmin*:*icinga*.
+
 ## Icinga Web 2
 
-Icinga Web 2 can be accessed at [http://localhost/icingaweb2](http://localhost/icingaweb2) with the credentials *icingaadmin*:*icinga* (if not set differently via variables).
+Icinga Web 2 can be accessed at [http://localhost/icingaweb2](http://localhost/icingaweb2) with the credentials *icingaadmin*:*icinga* (if not set differently via variables).  When using a volume for /etc/icingaweb2, make sure to set ICINGAWEB2_ADMIN_USER and ICINGAWEB2_ADMIN_PASS
 
 ### Saving PHP Sessions
 
@@ -75,43 +86,54 @@ The container gets automatically configured as an API master. But it has some ca
 
 ## Sending Notification Mails
 
-The container has `ssmtp` installed, which forwards mails to a preconfigured static server.
+The container has `msmtp` installed, which forwards mails to a preconfigured SMTP server (MTA).
 
-You have to create the files `ssmtp.conf` for general configuration and `revaliases` (mapping from local Unix-user to mail-address).
+The full documentation for [msmtp is found here](https://marlam.de/msmtp).
 
-```
-# ssmtp.conf
-root=<E-Mail address to use on>
-mailhub=smtp.<YOUR_MAILBOX>:587
-UseSTARTTLS=YES
-AuthUser=<Username for authentication (mostly the complete e-Mail-address)>
-AuthPass=<YOUR_PASSWORD>
-FromLineOverride=NO
-```
-**But be careful, ssmtp is not able to process special chars within the password correctly!**
-
-`revaliases` follows the format: `Unix-user:e-Mail-address:server`.
-Therefore the e-Mail-address has to match the `root`'s value in `ssmtp.conf`
-Also server has to match mailhub from `ssmtp.conf` **but without the port**.
+You have to edit the file `msmtp/msmtprc` for general configuration and `msmtp/aliases` (mapping from local Unix-user to mail-address). Please note that the example file can be heavily changed and secured, so read the msmtp docs listed above
 
 ```
-# revaliases
-root:<VALUE_FROM_ROOT>:smtp.<YOUR_MAILBOX>
-nagios:<VALUE_FROM_ROOT>:smtp.<YOUR_MAILBOX>
-www-data:<VALUE_FROM_ROOT>:smtp.<YOUR_MAILBOX>
+# msmtp/msmtprc
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        /var/log/msmtp.log
+aliases        /etc/aliases
+
+# Gmail
+account        gmail
+host           smtp.gmail.com
+port           587
+from           <your-email-address@gmail.com>
+user           <your-email-address@gmail.com>
+password       <your-password-or-eval-command-to-gpg-file>
+
+# Set a default account
+account default: gmail
 ```
 
-These files have to get mounted into the container. Add these flags to your `docker run`-command:
+*Note that Gmail has become very restrictive, the preparation and config must be done in Gmail's settings. If you can't get it to work, consider another SMTP service*.
+
+`msmtp/aliases` follows the format: `Unix-user: e-mail-address`.
+
 ```
--v $(pwd)/revaliases:/etc/ssmtp/revaliases:ro
--v $(pwd)/ssmtp.conf:/etc/ssmtp/ssmtp.conf:ro
+# msmtp/aliases
+root:<YOUR_MAILBOX>
+default:<YOUR_MAILBOX>
 ```
 
-If you want to change the display-name of sender-address, you have to define the variable `ICINGA2_USER_FULLNAME`.
+As a last config change, edit the `data/icinga/etc/icinga2/conf.d/users.conf` and change the e-mail address `root@localhost` to either `root` or a valid external address. This must be done as msmtp interprets all addresses with an at-sign as external and the transport will fail. If the address is changed to `root` the aliasing feature will use your root alias instead.
 
-If this does not work, please ask your provider for the correct mail-settings or consider the [ssmtp.conf(5)-manpage](https://linux.die.net/man/5/ssmtp.conf) or Section ["Reverse Aliases" on ssmtp(8)](https://linux.die.net/man/8/ssmtp).
-Also you can debug your config, by executing inside your container `ssmtp -v $address` and pressing 2x Enter.
-It will send an e-Mail to `$address` and give verbose log and all error-messages.
+These files have to be mounted into the container. Add these flags to your `docker run`-command:
+
+```
+-v $(pwd)/msmtp/aliases:/etc/aliases:ro
+-v $(pwd)/msmtp/msmtprc:/etc/msmtprc:ro
+```
+
+If you are using the `docker-compose` file, uncomment the settings for these files under the icinga2 node and rebuild.
+
 
 ## SSL Support
 
@@ -122,6 +144,12 @@ For enabling of SSL support, just add a volume to `/etc/apache2/ssl`, which cont
 - `icinga2.chain` (optional): If a certificate chain is needed, add this file. Consult your CA-vendor for additional info.
 
 For https-redirection or http/https dualstack consult `APACHE2_HTTP` env-variable.
+
+## Custom CA Support
+
+In the case where you need to trust a non-default CA, add the certificate(s) as `.crt` files to a volume to be mounted at `/usr/local/share/ca-certificates/`.
+
+Any certificates that are CA certificates with a `.crt` extension in that volume will automatically be added to the CA store at startup.
 
 # Adding own modules
 
@@ -175,12 +203,17 @@ The variables default their respective `DEFAULT` service variable.
 | `ICINGA2_FEATURE_GRAPHITE_HOST` | graphite | hostname or IP address where Carbon/Graphite daemon is running |
 | `ICINGA2_FEATURE_GRAPHITE_PORT` | 2003 | Carbon port for graphite |
 | `ICINGA2_FEATURE_GRAPHITE_URL` | http://${ICINGA2_FEATURE_GRAPHITE_HOST} | Web-URL for Graphite |
+| `ICINGA2_FEATURE_GRAPHITE_SEND_THRESHOLD` | true | If you want to send `min`, `max`, `warn` and `crit` values for perf data |
+| `ICINGA2_FEATURE_GRAPHITE_SEND_METADATA` | false | If you want to send `state`, `latency` and `execution_time` values for the checks |
 | `ICINGA2_FEATURE_DIRECTOR` | true | Set to false or 0 to disable icingaweb2 director |
+| `ICINGA2_FEATURE_DIRECTOR_USER` | icinga2-director | Icinga2director Login User |
+| `ICINGA2_FEATURE_DIRECTOR_PASS` | *random generated each start* | Icinga2director Login Password<br>*Set this to prevent continues [admin] modify apiuser "icinga2-director" activities* |
 | `DIRECTOR_KICKSTART` | true | Set to false to disable icingaweb2 director's auto kickstart at container startup. *Value is only used, if icingaweb2 director is enabled.* |
 | `ICINGAWEB2_ADMIN_USER` | icingaadmin | Icingaweb2 Login User<br>*After changing the username, you should also remove the old User in icingaweb2-> Configuration-> Authentication-> Users* |
 | `ICINGAWEB2_ADMIN_PASS` | icinga | Icingaweb2 Login Password |
 | `ICINGA2_USER_FULLNAME` | Icinga | Sender's display-name for notification e-Mails |
 | `APACHE2_HTTP` | `REDIRECT` | **Variable is only active, if both SSL-certificate and SSL-key are in place.** `BOTH`: Allow HTTP and https connections simultaneously. `REDIRECT`: Rewrite HTTP-requests to HTTPS |
+| `MYSQL_ROOT_USER` | root | If your MySQL host is not on `localhost`, but you want the icinga2 container to setup the DBs for itself, specify the root user of your MySQL server in this variable. |
 | `MYSQL_ROOT_PASSWORD` | *unset* | If your MySQL host is not on `localhost`, but you want the icinga2 container to setup the DBs for itself, specify the root password of your MySQL server in this variable. |
 | *other MySQL variables* | *none* | All combinations of MySQL variables aren't listed in this reference. Please see above in the MySQL section for this. |
 
